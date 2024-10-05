@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Audio Call</title>
+</head>
+<body>
+    <h1>WebRTC Audio Call</h1>
+    <div>
+        <input type="text" id="roomId" placeholder="Enter Room ID">
+        <button id="joinRoomBtn">Join Room</button>
+    </div>
+
+    <div>
+        <button id="callBtn">Start Call</button>
+    </div>
+
+    <!-- Audio element to play the remote audio stream -->
+    <audio id="remoteAudio" autoplay></audio>
+
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <script>
+        const socket = io('http://localhost:3001'); // Connect to your Socket.io server
+        let localStream;
+        let peerConnection;
+        let iceCandidatesQueue = [];  // Queue to store ICE candidates that arrive before the remote description is set
+        let remoteDescriptionSet = false;  // Flag to check if remote description is set
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' } // Google's public STUN server
+            ]
+        };
+
+        // UI elements
+        const roomIdInput = document.getElementById('roomId');
+        const joinRoomBtn = document.getElementById('joinRoomBtn');
+        const callBtn = document.getElementById('callBtn');
+        const remoteAudio = document.getElementById('remoteAudio');  // Audio element for remote audio
+
+        // Function to initialize a peer connection and setup event listeners
+        function initPeerConnection() {
+            peerConnection = new RTCPeerConnection(configuration);
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    const roomId = roomIdInput.value;
+                    socket.emit('candidate', { candidate: event.candidate, roomId });
+                }
+            };
+
+            // Handle remote audio track
+            peerConnection.ontrack = (event) => {
+                console.log('Remote stream added:', event.streams[0]);
+                // Attach the remote audio stream to the audio element
+                remoteAudio.srcObject = event.streams[0];
+            };
+
+            console.log('Peer connection initialized');
+        }
+
+        // Join room when 'Join Room' button is clicked
+        joinRoomBtn.addEventListener('click', () => {
+            const roomId = roomIdInput.value;
+            if (roomId) {
+                socket.emit('join-room', roomId);
+                console.log(`Joining room: ${roomId}`);
+                initPeerConnection(); // Initialize the peer connection
+            }
+        });
+
+        // Listen for the 'ready' event when the second user joins the room
+        socket.on('ready', () => {
+            console.log('Both users are ready');
+        });
+
+        // Start a call when 'Start Call' button is clicked
+        callBtn.addEventListener('click', async () => {
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            console.log('Got local stream');
+            localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
+
+            // Create an offer
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+
+            const roomId = roomIdInput.value;
+            socket.emit('offer', { offer, roomId });
+            console.log('Offer sent');
+        });
+
+        // When an offer is received from the other peer
+        socket.on('offer', async (data) => {
+            const { offer, roomId } = data;
+
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            console.log('Got local stream for answering');
+            localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
+
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+            remoteDescriptionSet = true; // Mark that remote description is set
+
+            // Process the queued ICE candidates
+            iceCandidatesQueue.forEach(async candidate => {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            });
+            iceCandidatesQueue = []; // Clear the queue
+
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+
+            socket.emit('answer', { answer, roomId });
+            console.log('Answer sent');
+        });
+
+        // When an answer is received from the other peer
+        socket.on('answer', async (data) => {
+            const { answer } = data;
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+            remoteDescriptionSet = true; // Mark that remote description is set
+
+            // Process the queued ICE candidates
+            iceCandidatesQueue.forEach(async candidate => {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            });
+            iceCandidatesQueue = []; // Clear the queue
+
+            console.log('Answer received and set');
+        });
+
+        // When ICE candidates are received from the other peer
+        socket.on('candidate', async (data) => {
+            const { candidate } = data;
+
+            // If remote description is not set, queue the ICE candidate
+            if (!remoteDescriptionSet) {
+                iceCandidatesQueue.push(candidate);
+            } else {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                console.log('ICE candidate added');
+            }
+        });
+    </script>
+</body>
+</html>
